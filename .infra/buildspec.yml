@@ -1,0 +1,22 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 18
+    commands:
+      - yarn install --frozen-lockfile
+
+  build:
+    commands:
+      - yarn build
+
+  post_build:
+    commands:
+      - firebase deploy --only functions:ticketAssigner
+
+artifacts:
+  files:
+    - lib/**/*
+    - package.json
+    - yarn.lock

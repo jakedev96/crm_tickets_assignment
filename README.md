@@ -1,0 +1,358 @@
+# ticket-assigner
+
+Motor de atribuição de tickets de CS para canais de atendimento da Shopper. Distribui tickets da fila Firestore para agentes disponíveis com garantia de anti-corrida via transações atômicas.
+
+---
+
+## Sumário
+
+- [Visão geral](#visão-geral)
+- [Arquitetura](#arquitetura)
+- [Estrutura de pastas](#estrutura-de-pastas)
+- [Modelo de dados](#modelo-de-dados)
+- [Fila de prioridade](#fila-de-prioridade)
+- [Estados do agente](#estados-do-agente)
+- [Pré-requisitos](#pré-requisitos)
+- [Instalação](#instalação)
+- [Variáveis de ambiente](#variáveis-de-ambiente)
+- [Rodando localmente](#rodando-localmente)
+- [Build e deploy](#build-e-deploy)
+- [Adicionando um novo canal](#adicionando-um-novo-canal)
+- [Testes](#testes)
+
+---
+
+## Visão geral
+
+O motor expõe três Cloud Functions Firebase:
+
+| Function | Trigger | Responsabilidade |
+|---|---|---|
+| `onWhatsAppTicketEnqueued` | Escrita em `crm_cs_queue/{ticketId}` | Ticket novo na fila → busca agente disponível |
+| `onAgentAvailable` | Escrita em `agent/{agentId}` | Agente entra na fila passiva → busca ticket compatível |
+| `reconcileAssignments` | Schedule — a cada 1 minuto | Rede de segurança para eventos que os listeners perderam |
+
+Toda atribuição é feita dentro de uma **transação Firestore** que lê e revalida o estado antes de escrever, prevenindo atribuições duplas mesmo sob alta concorrência. O SDK reexecuta a transação automaticamente em caso de contenção (até 5×).
+
+---
+
+## Arquitetura
+
+O projeto segue arquitetura em camadas com inversão de dependência (DI via [tsyringe](https://github.com/microsoft/tsyringe)):
+
+```
+Triggers (index.ts)
+    │
+    ▼
+Use Cases (domain/usecases/)
+    │  depende de interface →
+    ▼
+IAssignmentRepository (domain/repositories/)
+    │  implementado por →
+    ▼
+FbAssignmentRepository (implementation/database/firebase/)
+    │
+    ▼
+Firestore (Firebase Admin SDK)
+```
+
+**Camada de domínio** (`domain/`) não importa nada do Firebase — contém apenas regras de negócio puras, interfaces e modelos. Isso permite testar os use cases com repositórios fake sem tocar no banco.
+
+**Canal** (`IChannelConfig`) torna o motor agnóstico de canal. Cada canal registra sua própria configuração via child container do tsyringe — o repositório e os use cases são os mesmos para todos.
+
+---
+
+## Estrutura de pastas
+
+```
+ticket-assigner/
+├── index.ts                          # Cloud Functions — triggers e exports
+├── package.json
+├── tsconfig.json
+├── firebase.json
+├── Dockerfile
+├── docker-compose.yml
+│
+├── domain/
+│   ├── models/
+│   │   ├── IAgent.ts                 # Tipo do agente e AgentRole (AG1 | AG2)
+│   │   ├── IChannelConfig.ts         # Configuração por canal
+│   │   └── ICsQueueTicket.ts         # Tipo do documento de fila
+│   ├── repositories/
+│   │   └── IAssignmentRepository.ts  # Porta — interface pura
+│   └── usecases/
+│       ├── AssignTicketUseCase.ts    # byAgent / byTicket
+│       └── ReconcileAssignmentsUseCase.ts
+│
+├── implementation/
+│   ├── channels/
+│   │   └── whatsapp/
+│   │       ├── config.ts             # Configuração do canal WhatsApp
+│   │       └── di.ts                 # Child container + instâncias exportadas
+│   └── database/firebase/
+│       ├── firebase.ts               # initializeApp + export db
+│       └── repositories/
+│           └── FbAssignmentRepository.ts  # Implementação Firestore
+│
+├── secrets/                          # Ignorado pelo git
+│   └── service_account.json
+└── .infra/
+    └── buildspec.yml                 # CI/CD AWS CodeBuild
+```
+
+---
+
+## Modelo de dados
+
+### Coleção `agent`
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `role` | `'AG1' \| 'AG2'` | AG2 tem acesso a tickets escalados |
+| `availableAt` | `number` | Timestamp de quando ficou disponível; `0` = offline |
+| `inAttendanceAt` | `number` | Timestamp de início do atendimento; `0` = livre |
+| `waitingForNewTicket` | `number` | Timestamp de entrada na fila passiva; `0` = fora da fila |
+| `queueListenerHeartbeatAt` | `number` | Último heartbeat do browser (atualizado a cada 10s) |
+| `queueListenerHeartbeatRequestId` | `number` | ID da requisição do heartbeat |
+| `currentTicketId` | `string?` | Ticket em atendimento no momento |
+| `updatedAt` | `number` | — |
+
+> O motor age **exclusivamente** em agentes com `inAttendanceAt = 0` e `waitingForNewTicket ≠ 0` (**Fase 2**) e heartbeat fresco (≤ 30s). Não existe campo `status`.
+
+### Coleção `crm_cs_queue`
+
+| Campo | Tipo | Descrição |
+|---|---|---|
+| `ticketId` | `string` | ID do ticket na coleção principal |
+| `status` | `'open' \| 'pending' \| 'start_contact'` | Status atual do ticket |
+| `pendingType` | `'pendingAG2' \| 'pendingShopper' \| 'pendingClient'?` | Preenchido quando `status = 'pending'` |
+| `priority` | `number?` | `2` = escalado |
+| `newMessagesCount` | `number` | Espelho de `new_messages_count` do ticket principal |
+| `openedAt` | `number` | Espelho de `opened_at` do ticket principal |
+| `inAttendanceBy` | `string[]` | Array vazio = disponível; `[agentId]` = atribuído |
+| `createdAt` | `number` | — |
+| `updatedAt` | `number` | — |
+
+### Coleção `tickets`
+
+Campos escritos pelo motor na atribuição:
+
+| Campo | Valor escrito |
+|---|---|
+| `user_id` | `agentId` |
+| `attendedBy` | `arrayUnion(agentId)` |
+| `inAttendanceBy` | `[agentId]` |
+| `status` | `'inAttendance'` |
+
+---
+
+## Fila de prioridade
+
+O motor seleciona o próximo ticket em **4 camadas**, em ordem de prioridade:
+
+| Camada | Condição | Agente elegível |
+|---|---|---|
+| 1 | `pending` + `pendingType = 'pendingAG2'`, mais antigo primeiro | AG2 apenas |
+| 2 | `pending` + `pendingType = 'pendingShopper'`, mais antigo primeiro | AG2 apenas |
+| 3 | `pending` + `pendingType = 'pendingClient'` + `newMessagesCount > 0` | Qualquer |
+| 4 | `open` → `priority DESC`, depois `openedAt ASC` (FIFO) | Qualquer |
+
+---
+
+## Estados do agente
+
+| `availableAt` | `inAttendanceAt` | `waitingForNewTicket` | Estado |
+|---|---|---|---|
+| `0` | — | — | Offline |
+| `≠ 0` | `0` | `0` | Fase 1 — busca ativa (gerenciada pelo cliente) |
+| `≠ 0` | `0` | `≠ 0` | **Fase 2 — fila passiva (motor age aqui)** |
+| `≠ 0` | `≠ 0` | `0` | Em atendimento |
+| `≠ 0` | `0` | `≠ 0` + heartbeat stale | Zumbi — ignorado pelo motor |
+
+---
+
+## Pré-requisitos
+
+- Node.js `>= 18`
+- Yarn `1.x`
+- Docker + Docker Compose (para rodar localmente via container)
+- Firebase CLI `14.1.0` (instalado automaticamente no Docker)
+- Acesso ao projeto Firebase da Shopper
+- Service account JSON com permissão de leitura/escrita no Firestore
+
+---
+
+## Instalação
+
+```bash
+git clone git@github.com:shopperti/ticket-assigner.git
+cd ticket-assigner
+yarn install
+```
+
+---
+
+## Variáveis de ambiente
+
+Crie um arquivo `.env` na raiz (já está no `.gitignore`):
+
+```env
+# Caminho para o service account — relativo à raiz do projeto
+WHATSAPP_SERVICE_ACCOUNT=secrets/service_account.json
+
+# ID do projeto Firebase (staging ou produção)
+FB_PROJECT_ID=seu-projeto-firebase
+
+# Token de deploy do Firebase CLI — necessário apenas em CI/CD
+# Gere com: firebase login:ci
+FB_DEPLOY_TOKEN=
+```
+
+### Service account
+
+1. Acesse o [Console do Firebase](https://console.firebase.google.com) → **Configurações do projeto → Contas de serviço**
+2. Clique em **Gerar nova chave privada**
+3. Salve o JSON em `secrets/service_account.json`
+
+> A pasta `secrets/` está no `.gitignore` e nunca deve ser commitada.
+
+---
+
+## Rodando localmente
+
+O Docker Compose sobe o **emulador de Functions** apontando para o **Firestore real** do projeto configurado em `FB_PROJECT_ID`.
+
+```bash
+# Primeira vez ou após mudar dependências
+docker compose up --build
+
+# Demais vezes
+docker compose up
+```
+
+### Após alterar código TypeScript
+
+```bash
+# Recompila localmente
+yarn build
+
+# Reinicia o container para carregar o novo lib/
+docker compose restart ticket-assigner
+```
+
+### Endereços
+
+| Serviço | URL |
+|---|---|
+| Emulator UI | http://localhost:4000 |
+| Functions | http://localhost:5001 |
+
+### Parar
+
+```bash
+docker compose down
+```
+
+---
+
+## Build e deploy
+
+### Build local
+
+```bash
+yarn build        # compila TypeScript → lib/
+yarn watch        # compila em modo watch
+```
+
+### Deploy manual
+
+```bash
+yarn deploy
+# equivale a: firebase deploy --only functions
+```
+
+### Deploy via CI/CD (AWS CodeBuild)
+
+O pipeline é configurado em `.infra/buildspec.yml`. As variáveis `FB_PROJECT_ID` e `FB_DEPLOY_TOKEN` devem estar configuradas como secrets no ambiente de build.
+
+---
+
+## Adicionando um novo canal
+
+1. Crie `implementation/channels/<nome>/config.ts`:
+
+```ts
+import { IChannelConfig } from '../../../domain/models/IChannelConfig'
+
+export const meuCanalConfig: IChannelConfig = {
+  channel:             'meu-canal',
+  queueCollection:     'meu_canal_cs_queue',
+  ticketsCollection:   'meu_canal_tickets',
+  pendingTypesAG2Only: ['pendingAG2'],
+}
+```
+
+2. Crie `implementation/channels/<nome>/di.ts`:
+
+```ts
+import { container } from 'tsyringe'
+import { IChannelConfig } from '../../../domain/models/IChannelConfig'
+import { IAssignmentRepository } from '../../../domain/repositories/IAssignmentRepository'
+import { FbAssignmentRepository } from '../../database/firebase/repositories/FbAssignmentRepository'
+import { AssignTicketUseCase } from '../../../domain/usecases/AssignTicketUseCase'
+import { ReconcileAssignmentsUseCase } from '../../../domain/usecases/ReconcileAssignmentsUseCase'
+import { meuCanalConfig } from './config'
+
+const meuCanalContainer = container.createChildContainer()
+meuCanalContainer.registerInstance<IChannelConfig>('ChannelConfig', meuCanalConfig)
+meuCanalContainer.register<IAssignmentRepository>('AssignmentRepository', { useClass: FbAssignmentRepository })
+
+export const meuCanalAssign    = meuCanalContainer.resolve(AssignTicketUseCase)
+export const meuCanalReconcile = meuCanalContainer.resolve(ReconcileAssignmentsUseCase)
+```
+
+3. Em `index.ts`, adicione o trigger de ticket e inclua o canal no `onAgentAvailable` e no reconciler:
+
+```ts
+import { meuCanalAssign, meuCanalReconcile } from './implementation/channels/meu-canal/di'
+
+// Trigger de ticket
+export const onMeuCanalTicketEnqueued = onDocumentWritten('meu_canal_cs_queue/{ticketId}', ...)
+
+// onAgentAvailable — adicione ao encadeamento
+const result = await whatsappAssign.byAgent(agentId)
+  ?? await meuCanalAssign.byAgent(agentId)
+
+// reconcileAssignments — adicione ao Promise.all
+await Promise.all([
+  whatsappReconcile.execute(),
+  meuCanalReconcile.execute(),
+])
+```
+
+Nenhum arquivo de domínio ou repositório precisa ser alterado.
+
+---
+
+## Testes
+
+Recomendado usar os **emuladores do Firebase** para testes de integração.
+
+### Cenários base
+
+- **1 agente + 2 tickets** — apenas 1 atribuído; o segundo aguarda o agente encerrar
+- **2 agentes + 1 ticket** — apenas 1 agente recebe; o outro segue em Fase 2
+- **Corrida** — `onTicketEnqueued` e `onAgentAvailable` para o mesmo par simultaneamente → exatamente 1 atribuição
+- **Reconciler** — ticket órfão sem trigger → atribuído em ≤ 1 min
+
+### Cenários de papel (AG1/AG2)
+
+- AG2 disponível + fila com `pendingAG2` e `open` → `pendingAG2` atribuído primeiro
+- AG1 disponível + somente `pendingAG2` na fila → nenhuma atribuição
+- `pendingClient` com `newMessagesCount = 0` → não atribuído pela camada 3; cai na camada 4
+
+### Cenários de heartbeat
+
+- Agente com heartbeat stale (> 30s) → ignorado; próximo agente elegível recebe
+- Todos os agentes stale → ticket fica na fila; reconciler também ignora
+- Mais de 10 agentes stale à frente → nenhum encontrado; ticket aguarda próximo ciclo
