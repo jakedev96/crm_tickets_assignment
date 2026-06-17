@@ -5,6 +5,6 @@ export interface IChannelConfig {
   queueCollection: string
   /** Coleção Firestore dos tickets do canal */
   ticketsCollection: string
-  /** Valores de pendingType que somente AG2 pode atender */
+  /** Valores de pending_type que somente AG2 pode atender */
   pendingTypesAG2Only: string[]
 }

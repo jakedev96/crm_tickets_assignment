@@ -3,16 +3,29 @@
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
   },
-  "emulators": {
-    "functions": { "port": 5001 },
-    "firestore": { "port": 8080 },
-    "ui": { "enabled": true, "port": 4000 }
-  },
   "functions": [
     {
       "source": ".",
-      "codebase": "ticketAssigner",
-      "ignore": ["node_modules", "lib", ".git"]
+      "runtime": "nodejs20"
     }
-  ]
+  ],
+  "emulators": {
+    "functions": {
+      "host": "0.0.0.0",
+      "port": 5001
+    },
+    "firestore": {
+      "host": "0.0.0.0",
+      "port": 8080
+    },
+    "pubsub": {
+      "host": "0.0.0.0",
+      "port": 8085
+    },
+    "ui": {
+      "enabled": true,
+      "host": "0.0.0.0",
+      "port": 4000
+    }
+  }
 }

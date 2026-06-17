@@ -4,7 +4,7 @@ services:
       context: .
       target: production
     # Sobe apenas o emulador de Functions — Firestore aponta para o projeto real
-    command: firebase emulators:start --only functions --project $FB_PROJECT_ID
+    command: sh -c "yarn build && firebase emulators:start --only functions --project $FB_PROJECT_ID"
     ports:
       - "5001:5001"   # Functions
       - "4000:4000"   # Emulator UI

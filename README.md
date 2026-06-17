@@ -66,34 +66,38 @@ Firestore (Firebase Admin SDK)
 
 ```
 ticket-assigner/
-├── index.ts                          # Cloud Functions — triggers e exports
+├── functions/
+│   ├── index.ts                          # Cloud Functions — triggers e exports
+│   ├── domain/
+│   │   ├── models/
+│   │   │   ├── IChannelConfig.ts         # Configuração por canal (compartilhado)
+│   │   │   └── channels/
+│   │   │       └── whatsapp/
+│   │   │           ├── IAgent.ts         # Tipo do agente e AgentRole (AG1 | AG2)
+│   │   │           └── ICrmCsQueueWhatsappTicket.ts  # Tipo do documento de fila
+│   │   ├── repositories/
+│   │   │   └── IAssignmentRepository.ts  # Porta — interface pura
+│   │   └── usecases/
+│   │       ├── AssignTicketUseCase.ts    # byAgent / byTicket
+│   │       └── ReconcileAssignmentsUseCase.ts
+│   └── implementation/
+│       ├── channels/
+│       │   └── whatsapp/
+│       │       ├── config.ts             # Configuração do canal WhatsApp
+│       │       └── di.ts                 # Child container + instâncias exportadas
+│       └── database/firebase/
+│           ├── firebase.ts               # initializeApp + export db
+│           └── repositories/
+│               └── FbAssignmentRepository.ts  # Implementação Firestore
+│
+├── lib/                              # Output compilado (gerado por yarn build)
 ├── package.json
 ├── tsconfig.json
 ├── firebase.json
 ├── Dockerfile
 ├── docker-compose.yml
-│
-├── domain/
-│   ├── models/
-│   │   ├── IAgent.ts                 # Tipo do agente e AgentRole (AG1 | AG2)
-│   │   ├── IChannelConfig.ts         # Configuração por canal
-│   │   └── ICsQueueTicket.ts         # Tipo do documento de fila
-│   ├── repositories/
-│   │   └── IAssignmentRepository.ts  # Porta — interface pura
-│   └── usecases/
-│       ├── AssignTicketUseCase.ts    # byAgent / byTicket
-│       └── ReconcileAssignmentsUseCase.ts
-│
-├── implementation/
-│   ├── channels/
-│   │   └── whatsapp/
-│   │       ├── config.ts             # Configuração do canal WhatsApp
-│   │       └── di.ts                 # Child container + instâncias exportadas
-│   └── database/firebase/
-│       ├── firebase.ts               # initializeApp + export db
-│       └── repositories/
-│           └── FbAssignmentRepository.ts  # Implementação Firestore
-│
+├── firestore.rules                   # Regras de segurança Firestore (usadas pelo emulator)
+├── firestore.indexes.json            # Índices compostos do Firestore
 ├── secrets/                          # Ignorado pelo git
 │   └── service_account.json
 └── .infra/
@@ -125,10 +129,10 @@ ticket-assigner/
 |---|---|---|
 | `ticketId` | `string` | ID do ticket na coleção principal |
 | `status` | `'open' \| 'pending' \| 'start_contact'` | Status atual do ticket |
-| `pendingType` | `'pendingAG2' \| 'pendingShopper' \| 'pendingClient'?` | Preenchido quando `status = 'pending'` |
+| `pending_type` | `'pendingAG2' \| 'pendingShopper' \| 'pendingClient'?` | Preenchido quando `status = 'pending'` |
 | `priority` | `number?` | `2` = escalado |
-| `newMessagesCount` | `number` | Espelho de `new_messages_count` do ticket principal |
-| `openedAt` | `number` | Espelho de `opened_at` do ticket principal |
+| `new_messages_count` | `number` | Espelho de `new_messages_count` do ticket principal |
+| `opened_at` | `number` | Espelho de `opened_at` do ticket principal |
 | `inAttendanceBy` | `string[]` | Array vazio = disponível; `[agentId]` = atribuído |
 | `createdAt` | `number` | — |
 | `updatedAt` | `number` | — |
@@ -152,10 +156,10 @@ O motor seleciona o próximo ticket em **4 camadas**, em ordem de prioridade:
 
 | Camada | Condição | Agente elegível |
 |---|---|---|
-| 1 | `pending` + `pendingType = 'pendingAG2'`, mais antigo primeiro | AG2 apenas |
-| 2 | `pending` + `pendingType = 'pendingShopper'`, mais antigo primeiro | AG2 apenas |
-| 3 | `pending` + `pendingType = 'pendingClient'` + `newMessagesCount > 0` | Qualquer |
-| 4 | `open` → `priority DESC`, depois `openedAt ASC` (FIFO) | Qualquer |
+| 1 | `pending` + `pending_type = 'pendingAG2'`, mais antigo primeiro | AG2 apenas |
+| 2 | `pending` + `pending_type = 'pendingShopper'`, mais antigo primeiro | AG2 apenas |
+| 3 | `pending` + `pending_type = 'pendingClient'` + `new_messages_count > 0` | Qualquer |
+| 4 | `open` → `priority DESC`, depois `opened_at ASC` (FIFO) | Qualquer |
 
 ---
 
@@ -349,7 +353,7 @@ Recomendado usar os **emuladores do Firebase** para testes de integração.
 
 - AG2 disponível + fila com `pendingAG2` e `open` → `pendingAG2` atribuído primeiro
 - AG1 disponível + somente `pendingAG2` na fila → nenhuma atribuição
-- `pendingClient` com `newMessagesCount = 0` → não atribuído pela camada 3; cai na camada 4
+- `pendingClient` com `new_messages_count = 0` → não atribuído pela camada 3; cai na camada 4
 
 ### Cenários de heartbeat
 

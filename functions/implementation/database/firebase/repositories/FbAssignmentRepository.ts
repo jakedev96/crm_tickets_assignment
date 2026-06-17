@@ -3,7 +3,7 @@ import { FieldValue, type Transaction, type DocumentReference } from 'firebase-a
 import { db } from '../firebase'
 import { IAssignmentRepository } from '../../../../domain/repositories/IAssignmentRepository'
 import { IChannelConfig } from '../../../../domain/models/IChannelConfig'
-import { AgentRole } from '../../../../domain/models/IAgent'
+import { AgentRole } from '../../../../domain/models/channels/whatsapp/IAgent'
 
 const AGENT_COLLECTION        = 'agent'
 const HEARTBEAT_TTL_MS        = 30_000
@@ -69,8 +69,8 @@ export class FbAssignmentRepository implements IAssignmentRepository {
         const snap = await tx.get(
           base
             .where('status', '==', 'pending')
-            .where('pendingType', '==', pType)
-            .orderBy('openedAt', 'asc')
+            .where('pending_type', '==', pType)
+            .orderBy('opened_at', 'asc')
             .limit(1)
         )
         if (!snap.empty) return snap.docs[0].ref
@@ -81,10 +81,10 @@ export class FbAssignmentRepository implements IAssignmentRepository {
     const withMsgs = await tx.get(
       base
         .where('status', '==', 'pending')
-        .where('pendingType', '==', 'pendingClient')
-        .where('newMessagesCount', '>', 0)
-        .orderBy('newMessagesCount', 'asc') // Firestore: obrigatório no campo do range filter
-        .orderBy('openedAt', 'asc')
+        .where('pending_type', '==', 'pendingClient')
+        .where('new_messages_count', '>', 0)
+        .orderBy('new_messages_count', 'asc') // Firestore: obrigatório no campo do range filter
+        .orderBy('opened_at', 'asc')
         .limit(1)
     )
     if (!withMsgs.empty) return withMsgs.docs[0].ref
@@ -94,7 +94,7 @@ export class FbAssignmentRepository implements IAssignmentRepository {
       base
         .where('status', '==', 'open')
         .orderBy('priority', 'desc')
-        .orderBy('openedAt', 'asc')
+        .orderBy('opened_at', 'asc')
         .limit(1)
     )
     return open.empty ? null : open.docs[0].ref
@@ -166,7 +166,7 @@ export class FbAssignmentRepository implements IAssignmentRepository {
       const status: string = queueDoc.get('status')
       if (!(OPEN_STATUSES as readonly string[]).includes(status)) return null
 
-      const pendingType: string | undefined = queueDoc.get('pendingType')
+      const pendingType: string | undefined = queueDoc.get('pending_type')
       const now = Date.now()
       const agentRef = await this.selectAvailableAgentRef(tx, pendingType, now)
       if (!agentRef) return null
