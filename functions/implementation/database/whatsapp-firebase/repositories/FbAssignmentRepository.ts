@@ -5,10 +5,10 @@ import { IAssignmentRepository } from '../../../../domain/repositories/IAssignme
 import { IChannelConfig } from '../../../../domain/models/IChannelConfig'
 import { AgentRole } from '../../../../domain/models/channels/whatsapp/IAgent'
 
-const AGENT_COLLECTION        = 'agent'
-const HEARTBEAT_TTL_MS        = 30_000
+const AGENT_COLLECTION = 'agent'
+const HEARTBEAT_TTL_MS = 30_000
 const HEARTBEAT_MAX_FUTURE_MS = 10_000
-const AGENT_CANDIDATE_LIMIT   = 10
+const AGENT_CANDIDATE_LIMIT = 10
 
 const OPEN_STATUSES = ['open', 'pending', 'start_contact'] as const
 
@@ -29,7 +29,6 @@ function isHeartbeatFresh(heartbeatMs: number, now: number): boolean {
 
 @injectable()
 export class FbAssignmentRepository implements IAssignmentRepository {
-
   constructor(@inject('ChannelConfig') private readonly config: IChannelConfig) {}
 
   private async selectAvailableAgentRef(
@@ -37,7 +36,8 @@ export class FbAssignmentRepository implements IAssignmentRepository {
     pendingType: string | undefined,
     now: number
   ): Promise<DocumentReference | null> {
-    const base = db.collection(AGENT_COLLECTION)
+    const base = db
+      .collection(AGENT_COLLECTION)
       .where('inAttendanceAt', '==', 0)
       .where('waitingForNewTicket', '!=', 0)
       .orderBy('waitingForNewTicket', 'asc')
@@ -58,20 +58,13 @@ export class FbAssignmentRepository implements IAssignmentRepository {
     return null
   }
 
-  private async selectNextTicketRef(
-    tx: Transaction,
-    agentRole: AgentRole
-  ): Promise<DocumentReference | null> {
+  private async selectNextTicketRef(tx: Transaction, agentRole: AgentRole): Promise<DocumentReference | null> {
     const base = db.collection(this.config.queueCollection).where('inAttendanceBy', '==', [])
 
     if (agentRole === 'AG2') {
       for (const pType of this.config.pendingTypesAG2Only) {
         const snap = await tx.get(
-          base
-            .where('status', '==', 'pending')
-            .where('pending_type', '==', pType)
-            .orderBy('opened_at', 'asc')
-            .limit(1)
+          base.where('status', '==', 'pending').where('pending_type', '==', pType).orderBy('opened_at', 'asc').limit(1)
         )
         if (!snap.empty) return snap.docs[0].ref
       }
@@ -91,11 +84,7 @@ export class FbAssignmentRepository implements IAssignmentRepository {
 
     // Camada 4: open — escalado primeiro, depois FIFO
     const open = await tx.get(
-      base
-        .where('status', '==', 'open')
-        .orderBy('priority', 'desc')
-        .orderBy('opened_at', 'asc')
-        .limit(1)
+      base.where('status', '==', 'open').orderBy('priority', 'desc').orderBy('opened_at', 'asc').limit(1)
     )
     return open.empty ? null : open.docs[0].ref
   }
@@ -105,30 +94,28 @@ export class FbAssignmentRepository implements IAssignmentRepository {
     queueRef: DocumentReference,
     ticketRef: DocumentReference,
     agentRef: DocumentReference,
-    ticketId: string,
     agentId: string
   ): Promise<void> {
     const now = FieldValue.serverTimestamp()
-    tx.update(queueRef,  { inAttendanceBy: [agentId], updatedAt: Date.now() })
+    tx.update(queueRef, { updatedAt: Date.now() })
     tx.update(ticketRef, {
-      user_id:        agentId,
-      attendedBy:     FieldValue.arrayUnion(agentId),
+      user_id: agentId,
+      attendedBy: FieldValue.arrayUnion(agentId),
       inAttendanceBy: [agentId],
-      status:         'inAttendance',
-      updatedAt:      now,
+      status: 'inAttendance',
+      updatedAt: now
     })
     tx.update(agentRef, {
-      inAttendanceAt:                  now,
-      waitingForNewTicket:             0,
-      queueListenerHeartbeatAt:        0,
+      inAttendanceAt: now,
+      waitingForNewTicket: 0,
+      queueListenerHeartbeatAt: 0,
       queueListenerHeartbeatRequestId: 0,
-      currentTicketId:                 ticketId,
-      updatedAt:                       now,
+      updatedAt: now
     })
   }
 
   async assignByAgent(agentId: string): Promise<{ ticketId: string; agentId: string } | null> {
-    return db.runTransaction(async (tx) => {
+    return db.runTransaction(async (tx: Transaction) => {
       const agentRef = db.collection(AGENT_COLLECTION).doc(agentId)
       const agentDoc = await tx.get(agentRef)
       if (!agentDoc.exists) return null
@@ -152,13 +139,13 @@ export class FbAssignmentRepository implements IAssignmentRepository {
       if (!ticketDoc.exists) return null
       if ((ticketDoc.get('inAttendanceBy') as string[])?.length > 0) return null
 
-      await this.commitAssignment(tx, queueRef, ticketRef, agentRef, ticketId, agentId)
+      await this.commitAssignment(tx, queueRef, ticketRef, agentRef, agentId)
       return { ticketId, agentId }
     })
   }
 
   async assignByTicket(ticketId: string): Promise<{ ticketId: string; agentId: string } | null> {
-    return db.runTransaction(async (tx) => {
+    return db.runTransaction(async (tx: Transaction) => {
       const queueRef = db.collection(this.config.queueCollection).doc(ticketId)
       const queueDoc = await tx.get(queueRef)
       if (!queueDoc.exists || (queueDoc.get('inAttendanceBy') as string[])?.length > 0) return null
@@ -182,7 +169,7 @@ export class FbAssignmentRepository implements IAssignmentRepository {
       if ((ticketDoc.get('inAttendanceBy') as string[])?.length > 0) return null
 
       const agentId = agentRef.id
-      await this.commitAssignment(tx, queueRef, ticketRef, agentRef, ticketId, agentId)
+      await this.commitAssignment(tx, queueRef, ticketRef, agentRef, agentId)
       return { ticketId, agentId }
     })
   }

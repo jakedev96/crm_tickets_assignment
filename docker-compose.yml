@@ -1,15 +1,61 @@
+x-dev: &dev
+  build:
+    context: .
+    target: deps
+    args:
+      DEV_BUILD: 1
+  working_dir: /app
+  env_file:
+    - .env
+  profiles:
+    - dev
+
 services:
-  ticket-assigner:
-    build:
-      context: .
-      target: production
-    # Sobe apenas o emulador de Functions — Firestore aponta para o projeto real
-    command: sh -c "yarn build && firebase emulators:start --only functions --project $FB_PROJECT_ID"
+  functions:
+    <<: *dev
+    command: yarn watch
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - dist:/app/lib
+
+  emulators:
+    <<: *dev
+    networks:
+      shopper_devnet:
+        ipv4_address: 10.10.5.11 # ajuste conforme IPs disponíveis na rede
     ports:
       - "5001:5001"   # Functions
       - "4000:4000"   # Emulator UI
+      - "8080:8080"   # Firestore
+      - "8085:8085"   # Pub/Sub
+      # - "9230:9230" # Debugger
+    depends_on:
+      - functions
+    command: firebase emulators:start --only functions,firestore,pubsub --project ticket-assigner
+    volumes:
+      - ./node_modules:/app/node_modules
+      - dist:/app/lib
+      - ./.env:/app/.env
+      - ./secrets:/app/secrets
+      - ./firebase.json:/app/firebase.json
+      - firebase_cache:/root/.cache/firebase
+
+  deploy:
+    build:
+      context: .
+      target: production
     env_file:
       - .env
+    profiles:
+      - deploy
     volumes:
-      - ./secrets:/app/secrets   # service account do Firebase
-      - ./lib:/app/lib
+      - ./secrets:/app/secrets
+
+volumes:
+  dist:
+  firebase_cache:
+
+networks:
+  shopper_devnet:
+    external: true

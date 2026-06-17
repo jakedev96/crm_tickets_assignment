@@ -1,11 +1,8 @@
 {
-  "firestore": {
-    "rules": "firestore.rules",
-    "indexes": "firestore.indexes.json"
-  },
   "functions": [
     {
       "source": ".",
+      "codebase": "ticket-assigner",
       "runtime": "nodejs20"
     }
   ],

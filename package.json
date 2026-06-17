@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "deploy": "firebase deploy --only functions"
+    "deploy": "firebase deploy --only functions:ticket-assigner"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

@@ -1,5 +1,5 @@
 {
   "projects": {
-    "default": "demo-ticket-assigner"
+    "default": "ticket-assigner"
   }
 }

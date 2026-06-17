@@ -67,7 +67,9 @@ Firestore (Firebase Admin SDK)
 ```
 ticket-assigner/
 ├── functions/
-│   ├── index.ts                          # Cloud Functions — triggers e exports
+│   ├── index.ts                          # Entrypoint — re-exporta os módulos de canal
+│   ├── whatsapp/
+│   │   └── index.ts                      # Cloud Functions do canal WhatsApp
 │   ├── domain/
 │   │   ├── models/
 │   │   │   ├── IChannelConfig.ts         # Configuração por canal (compartilhado)
@@ -85,10 +87,11 @@ ticket-assigner/
 │       │   └── whatsapp/
 │       │       ├── config.ts             # Configuração do canal WhatsApp
 │       │       └── di.ts                 # Child container + instâncias exportadas
-│       └── database/firebase/
-│           ├── firebase.ts               # initializeApp + export db
-│           └── repositories/
-│               └── FbAssignmentRepository.ts  # Implementação Firestore
+│       └── database/
+│           └── whatsapp-firebase/
+│               ├── firebase.ts           # initializeApp + export db
+│               └── repositories/
+│                   └── FbAssignmentRepository.ts  # Implementação Firestore
 │
 ├── lib/                              # Output compilado (gerado por yarn build)
 ├── package.json
@@ -224,24 +227,17 @@ FB_DEPLOY_TOKEN=
 
 ## Rodando localmente
 
-O Docker Compose sobe o **emulador de Functions** apontando para o **Firestore real** do projeto configurado em `FB_PROJECT_ID`.
+O ambiente local usa dois containers via Docker Compose:
+
+- **`functions`** — compila o TypeScript em modo watch; qualquer alteração em `functions/` é recompilada automaticamente
+- **`emulators`** — Firebase Emulator Suite (Functions + Firestore + Pub/Sub)
 
 ```bash
 # Primeira vez ou após mudar dependências
-docker compose up --build
+docker compose --profile dev up --build
 
 # Demais vezes
-docker compose up
-```
-
-### Após alterar código TypeScript
-
-```bash
-# Recompila localmente
-yarn build
-
-# Reinicia o container para carregar o novo lib/
-docker compose restart ticket-assigner
+docker compose --profile dev up
 ```
 
 ### Endereços
@@ -250,11 +246,13 @@ docker compose restart ticket-assigner
 |---|---|
 | Emulator UI | http://localhost:4000 |
 | Functions | http://localhost:5001 |
+| Firestore | localhost:8080 |
+| Pub/Sub | localhost:8085 |
 
 ### Parar
 
 ```bash
-docker compose down
+docker compose --profile dev down
 ```
 
 ---
@@ -272,8 +270,18 @@ yarn watch        # compila em modo watch
 
 ```bash
 yarn deploy
-# equivale a: firebase deploy --only functions
+# equivale a: firebase deploy --only functions:ticket-assigner
 ```
+
+O deploy usa a **codebase** `ticket-assigner` configurada no `firebase.json`, o que garante que apenas as functions deste repositório são gerenciadas — functions de outros projetos no mesmo Firebase não são afetadas.
+
+### Deploy via Docker (homolog)
+
+```bash
+docker compose --profile deploy up
+```
+
+Constrói a imagem de produção, compila o TypeScript e executa o deploy. As variáveis `FB_PROJECT_ID` e `FB_DEPLOY_TOKEN` devem estar no `.env`.
 
 ### Deploy via CI/CD (AWS CodeBuild)
 
