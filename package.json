@@ -2,7 +2,7 @@
   "name": "ticket-assigner",
   "version": "1.0.0",
   "main": "lib/index.js",
-  "repository": "git@github.com:shopperti/ticket-assigner.git",
+  "repository": "git@github.com:jakedev96/crm_ticket_assigner.git",
   "author": "Jake Chien <jake.chien@shopper.com.br>",
   "license": "Copyright Shopper.com.br",
   "private": true,

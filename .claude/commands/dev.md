@@ -63,8 +63,8 @@ index.ts (triggers)
 - Atualizar `inAttendanceBy` na `crm_cs_queue` E no documento de `tickets` na mesma transação
 
 **Novos campos de agente ou fila:**
-- Campos novos no agente → atualizar `IAgent.ts`
-- Campos novos na fila → atualizar `ICsQueueTicket.ts`
+- Campos novos no agente → atualizar `domain/models/channels/whatsapp/IAgent.ts`
+- Campos novos na fila → atualizar `domain/models/channels/whatsapp/ICrmCsQueueWhatsappTicket.ts`
 
 **Imports de tipos:**
 - Usar `import type` para tipos usados apenas como anotação (ex: `import type { Transaction } from 'firebase-admin/firestore'`)
