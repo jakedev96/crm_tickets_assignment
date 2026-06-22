@@ -9,7 +9,6 @@ Motor de atribuição de tickets de CS para canais de atendimento da Shopper. Di
 - [Visão geral](#visão-geral)
 - [Arquitetura](#arquitetura)
 - [Estrutura de pastas](#estrutura-de-pastas)
-- [Modelo de dados](#modelo-de-dados)
 - [Fila de prioridade](#fila-de-prioridade)
 - [Estados do agente](#estados-do-agente)
 - [Pré-requisitos](#pré-requisitos)
@@ -108,50 +107,6 @@ ticket-assigner/
 
 ---
 
-## Modelo de dados
-
-### Coleção `agent`
-
-| Campo | Tipo | Descrição |
-|---|---|---|
-| `role` | `'AG1' \| 'AG2'` | AG2 tem acesso a tickets escalados |
-| `availableAt` | `number` | Timestamp de quando ficou disponível; `0` = offline |
-| `inAttendanceAt` | `number` | Timestamp de início do atendimento; `0` = livre |
-| `waitingForNewTicket` | `number` | Timestamp de entrada na fila passiva; `0` = fora da fila |
-| `queueListenerHeartbeatAt` | `number` | Último heartbeat do browser (atualizado a cada 10s) |
-| `queueListenerHeartbeatRequestId` | `number` | ID da requisição do heartbeat |
-| `currentTicketId` | `string?` | Ticket em atendimento no momento |
-| `updatedAt` | `number` | — |
-
-> O motor age **exclusivamente** em agentes com `inAttendanceAt = 0` e `waitingForNewTicket ≠ 0` (**Fase 2**) e heartbeat fresco (≤ 30s). Não existe campo `status`.
-
-### Coleção `crm_cs_queue`
-
-| Campo | Tipo | Descrição |
-|---|---|---|
-| `ticketId` | `string` | ID do ticket na coleção principal |
-| `status` | `'open' \| 'pending' \| 'start_contact'` | Status atual do ticket |
-| `pending_type` | `'pendingAG2' \| 'pendingShopper' \| 'pendingClient'?` | Preenchido quando `status = 'pending'` |
-| `priority` | `number?` | `2` = escalado |
-| `new_messages_count` | `number` | Espelho de `new_messages_count` do ticket principal |
-| `opened_at` | `number` | Espelho de `opened_at` do ticket principal |
-| `inAttendanceBy` | `string[]` | Array vazio = disponível; `[agentId]` = atribuído |
-| `createdAt` | `number` | — |
-| `updatedAt` | `number` | — |
-
-### Coleção `tickets`
-
-Campos escritos pelo motor na atribuição:
-
-| Campo | Valor escrito |
-|---|---|
-| `user_id` | `agentId` |
-| `attendedBy` | `arrayUnion(agentId)` |
-| `inAttendanceBy` | `[agentId]` |
-| `status` | `'inAttendance'` |
-
----
-
 ## Fila de prioridade
 
 O motor seleciona o próximo ticket em **4 camadas**, em ordem de prioridade:
@@ -179,7 +134,7 @@ O motor seleciona o próximo ticket em **4 camadas**, em ordem de prioridade:
 
 ## Pré-requisitos
 
-- Node.js `>= 18`
+- Node.js `20`
 - Yarn `1.x`
 - Docker + Docker Compose (para rodar localmente via container)
 - Firebase CLI `14.1.0` (instalado automaticamente no Docker)
@@ -350,7 +305,7 @@ Recomendado usar os **emuladores do Firebase** para testes de integração.
 
 - **1 agente + 2 tickets** — apenas 1 atribuído; o segundo aguarda o agente encerrar
 - **2 agentes + 1 ticket** — apenas 1 agente recebe; o outro segue em Fase 2
-- **Corrida** — `onTicketEnqueued` e `onAgentAvailable` para o mesmo par simultaneamente → exatamente 1 atribuição
+- **Corrida** — `onAgentAvailable` para o mesmo par simultaneamente → exatamente 1 atribuição
 - **Reconciler** — ticket órfão sem trigger → atribuído em ≤ 1 min
 
 ### Cenários de papel (AG1/AG2)
