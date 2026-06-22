@@ -5,6 +5,5 @@ import { IAssignmentRepository } from '../repositories/IAssignmentRepository'
 export class AssignTicketUseCase {
   constructor(@inject('AssignmentRepository') private readonly repo: IAssignmentRepository) {}
 
-  byAgent  = (agentId: string)  => this.repo.assignByAgent(agentId)
-  byTicket = (ticketId: string) => this.repo.assignByTicket(ticketId)
+  byAgent = (agentId: string) => this.repo.assignByAgent(agentId)
 }

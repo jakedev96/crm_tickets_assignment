@@ -1,16 +1,14 @@
 import { inject, injectable } from 'tsyringe'
-import { FieldValue, type Transaction, type DocumentReference } from 'firebase-admin/firestore'
+import { FieldValue, type Transaction, type DocumentReference, type DocumentSnapshot } from 'firebase-admin/firestore'
 import { db } from '../firebase'
 import { IAssignmentRepository } from '../../../../domain/repositories/IAssignmentRepository'
 import { IChannelConfig } from '../../../../domain/models/IChannelConfig'
 import { AgentRole } from '../../../../domain/models/channels/whatsapp/IAgent'
 
 const AGENT_COLLECTION = 'agent'
+const AGENT_HEARTBEAT_COLLECTION = 'agent_heartbeat'
 const HEARTBEAT_TTL_MS = 30_000
 const HEARTBEAT_MAX_FUTURE_MS = 10_000
-const AGENT_CANDIDATE_LIMIT = 10
-
-const OPEN_STATUSES = ['open', 'pending', 'start_contact'] as const
 
 function firestoreTimeToMs(val: unknown): number {
   if (!val) return 0
@@ -27,38 +25,27 @@ function isHeartbeatFresh(heartbeatMs: number, now: number): boolean {
   return age <= HEARTBEAT_TTL_MS && age >= -HEARTBEAT_MAX_FUTURE_MS
 }
 
+function isAgentStillAvailable(data: Record<string, unknown>, heartbeatMs: number, now: number): boolean {
+  return data['inAttendanceAt'] === 0 && !!data['waitingForNewTicket'] && isHeartbeatFresh(heartbeatMs, now)
+}
+
+function isAlreadyAssigned(doc: DocumentSnapshot): boolean {
+  return ((doc.get('inAttendanceBy') as string[])?.length ?? 0) > 0
+}
+
+function availableAgentsBaseQuery() {
+  return db
+    .collection(AGENT_COLLECTION)
+    .where('inAttendanceAt', '==', 0)
+    .where('waitingForNewTicket', '!=', 0)
+    .orderBy('waitingForNewTicket', 'asc')
+}
+
 @injectable()
 export class FbAssignmentRepository implements IAssignmentRepository {
   constructor(@inject('ChannelConfig') private readonly config: IChannelConfig) {}
 
-  private async selectAvailableAgentRef(
-    tx: Transaction,
-    pendingType: string | undefined,
-    now: number
-  ): Promise<DocumentReference | null> {
-    const base = db
-      .collection(AGENT_COLLECTION)
-      .where('inAttendanceAt', '==', 0)
-      .where('waitingForNewTicket', '!=', 0)
-      .orderBy('waitingForNewTicket', 'asc')
-
-    const needsAG2 = pendingType !== undefined && this.config.pendingTypesAG2Only.includes(pendingType)
-    const q = needsAG2
-      ? base.where('role', '==', 'AG2').limit(AGENT_CANDIDATE_LIMIT)
-      : base.limit(AGENT_CANDIDATE_LIMIT)
-
-    const snap = await tx.get(q)
-
-    for (const doc of snap.docs) {
-      const d = doc.data()
-      if (d['inAttendanceAt'] !== 0 || !d['waitingForNewTicket']) continue
-      if (!isHeartbeatFresh(firestoreTimeToMs(d['queueListenerHeartbeatAt']), now)) continue
-      return doc.ref
-    }
-    return null
-  }
-
-  private async selectNextTicketRef(tx: Transaction, agentRole: AgentRole): Promise<DocumentReference | null> {
+private async selectNextTicketId(tx: Transaction, agentRole: AgentRole): Promise<string | null> {
     const base = db.collection(this.config.queueCollection).where('inAttendanceBy', '==', [])
 
     if (agentRole === 'AG2') {
@@ -66,27 +53,41 @@ export class FbAssignmentRepository implements IAssignmentRepository {
         const snap = await tx.get(
           base.where('status', '==', 'pending').where('pending_type', '==', pType).orderBy('opened_at', 'asc').limit(1)
         )
-        if (!snap.empty) return snap.docs[0].ref
+        if (!snap.empty) {
+          console.log(`[repo:selectNextTicketId] ticketId=${snap.docs[0].id} via AG2 (pending_type=${pType})`)
+          return snap.docs[0].id
+        }
       }
     }
 
-    // Camada 3: pendingClient com novas mensagens
+    // Layer 3: pendingClient with new messages
     const withMsgs = await tx.get(
       base
         .where('status', '==', 'pending')
         .where('pending_type', '==', 'pendingClient')
         .where('new_messages_count', '>', 0)
-        .orderBy('new_messages_count', 'asc') // Firestore: obrigatório no campo do range filter
+        .orderBy('new_messages_count', 'asc')
         .orderBy('opened_at', 'asc')
         .limit(1)
     )
-    if (!withMsgs.empty) return withMsgs.docs[0].ref
 
-    // Camada 4: open — escalado primeiro, depois FIFO
+    if (!withMsgs.empty) {
+      console.log(`[repo:selectNextTicketId] ticketId=${withMsgs.docs[0].id} via pendingClient with new messages`)
+      return withMsgs.docs[0].id
+    }
+
+    // Layer 4: open — FIFO
     const open = await tx.get(
-      base.where('status', '==', 'open').orderBy('priority', 'desc').orderBy('opened_at', 'asc').limit(1)
+      base.where('status', '==', 'open').orderBy('opened_at', 'asc').limit(1)
     )
-    return open.empty ? null : open.docs[0].ref
+
+    if (!open.empty) {
+      console.log(`[repo:selectNextTicketId] ticketId=${open.docs[0].id} via open status`)
+      return open.docs[0].id
+    }
+
+    console.log(`[repo:selectNextTicketId] no tickets available (role=${agentRole})`)
+    return null
   }
 
   private async commitAssignment(
@@ -96,98 +97,80 @@ export class FbAssignmentRepository implements IAssignmentRepository {
     agentRef: DocumentReference,
     agentId: string
   ): Promise<void> {
+    console.log(`[repo:commitAssignment] ticketId=${ticketRef.id} agentId=${agentId}`)
     const now = FieldValue.serverTimestamp()
-    tx.update(queueRef, { updatedAt: Date.now() })
+    tx.update(queueRef, {
+      inAttendanceBy: [agentId],
+      updatedAt: Date.now()
+    })
     tx.update(ticketRef, {
       user_id: agentId,
       attendedBy: FieldValue.arrayUnion(agentId),
       inAttendanceBy: [agentId],
-      status: 'inAttendance',
       updatedAt: now
     })
     tx.update(agentRef, {
       inAttendanceAt: now,
       waitingForNewTicket: 0,
-      queueListenerHeartbeatAt: 0,
-      queueListenerHeartbeatRequestId: 0,
       updatedAt: now
     })
+    const heartbeatRef = db.collection(AGENT_HEARTBEAT_COLLECTION).doc(agentRef.id)
+    tx.set(heartbeatRef, { queueListenerHeartbeatAt: 0, queueListenerHeartbeatRequestId: 0 }, { merge: true })
   }
 
-  async assignByAgent(agentId: string): Promise<{ ticketId: string; agentId: string } | null> {
+  async assignByAgent(agentId: string): Promise<{ ticketId: string; agentName: string } | null> {
     return db.runTransaction(async (tx: Transaction) => {
       const agentRef = db.collection(AGENT_COLLECTION).doc(agentId)
       const agentDoc = await tx.get(agentRef)
       if (!agentDoc.exists) return null
 
-      const agent = agentDoc.data()!
-      if (agent['inAttendanceAt'] !== 0 || !agent['waitingForNewTicket']) return null
-
       const now = Date.now()
-      if (!isHeartbeatFresh(firestoreTimeToMs(agent['queueListenerHeartbeatAt']), now)) return null
+      const agentData = agentDoc.data() as Record<string, unknown>
+      const heartbeatRef = db.collection(AGENT_HEARTBEAT_COLLECTION).doc(agentId)
+      const heartbeatDoc = await tx.get(heartbeatRef)
+      const heartbeatMs = firestoreTimeToMs(heartbeatDoc.get('queueListenerHeartbeatAt'))
+      const available = isAgentStillAvailable(agentData, heartbeatMs, now)
 
-      const agentRole: AgentRole = agent['role'] ?? 'AG1'
-      const queueRef = await this.selectNextTicketRef(tx, agentRole)
-      if (!queueRef) return null
+      console.log(
+        `[repo:assignByAgent] agentId=${agentId} role=${agentData['role']} heartbeatAge=${now - heartbeatMs}ms available=${available}`
+      )
+      if (!available) return null
 
-      const queueDoc = await tx.get(queueRef)
-      if ((queueDoc.get('inAttendanceBy') as string[])?.length > 0) return null
+      const agentRole: AgentRole = (agentData['role'] as AgentRole) ?? 'AG1'
+      const ticketId = await this.selectNextTicketId(tx, agentRole)
+      if (!ticketId) return null
 
-      const ticketId: string = queueDoc.get('ticketId')
-      const ticketRef = db.collection(this.config.ticketsCollection).doc(ticketId)
-      const ticketDoc = await tx.get(ticketRef)
-      if (!ticketDoc.exists) return null
-      if ((ticketDoc.get('inAttendanceBy') as string[])?.length > 0) return null
-
-      await this.commitAssignment(tx, queueRef, ticketRef, agentRef, agentId)
-      return { ticketId, agentId }
-    })
-  }
-
-  async assignByTicket(ticketId: string): Promise<{ ticketId: string; agentId: string } | null> {
-    return db.runTransaction(async (tx: Transaction) => {
       const queueRef = db.collection(this.config.queueCollection).doc(ticketId)
-      const queueDoc = await tx.get(queueRef)
-      if (!queueDoc.exists || (queueDoc.get('inAttendanceBy') as string[])?.length > 0) return null
-
-      const status: string = queueDoc.get('status')
-      if (!(OPEN_STATUSES as readonly string[]).includes(status)) return null
-
-      const pendingType: string | undefined = queueDoc.get('pending_type')
-      const now = Date.now()
-      const agentRef = await this.selectAvailableAgentRef(tx, pendingType, now)
-      if (!agentRef) return null
-
-      const agentDoc = await tx.get(agentRef)
-      const agent = agentDoc.data()!
-      if (agent['inAttendanceAt'] !== 0 || !agent['waitingForNewTicket']) return null
-      if (pendingType && this.config.pendingTypesAG2Only.includes(pendingType) && agent['role'] !== 'AG2') return null
-
       const ticketRef = db.collection(this.config.ticketsCollection).doc(ticketId)
-      const ticketDoc = await tx.get(ticketRef)
-      if (!ticketDoc.exists) return null
-      if ((ticketDoc.get('inAttendanceBy') as string[])?.length > 0) return null
 
-      const agentId = agentRef.id
+      const [queueDoc, ticketDoc] = await Promise.all([tx.get(queueRef), tx.get(ticketRef)])
+      if (!queueDoc.exists || !ticketDoc.exists) {
+        console.warn(`[repo:assignByAgent] ticketId=${ticketId} document missing in transaction`)
+        return null
+      }
+
+      if (isAlreadyAssigned(ticketDoc)) {
+        console.warn(`[repo:assignByAgent] ticketId=${ticketId} already assigned in transaction`)
+        return null
+      }
+
+      const agentName = agentDoc.get('name')
       await this.commitAssignment(tx, queueRef, ticketRef, agentRef, agentId)
-      return { ticketId, agentId }
+      console.info(`[repo:assignByAgent] ticketId=${ticketId} → assigned to agent= ${agentName}`)
+      return { ticketId, agentName }
     })
   }
 
   async reconcile(): Promise<number> {
-    const snap = await db
-      .collection(AGENT_COLLECTION)
-      .where('inAttendanceAt', '==', 0)
-      .where('waitingForNewTicket', '!=', 0)
-      .orderBy('waitingForNewTicket', 'asc')
-      .get()
-
+    const snap = await availableAgentsBaseQuery().get()
     const now = Date.now()
+
     let count = 0
 
     for (const doc of snap.docs) {
-      const d = doc.data()
-      if (!isHeartbeatFresh(firestoreTimeToMs(d['queueListenerHeartbeatAt']), now)) continue
+      const heartbeatDoc = await db.collection(AGENT_HEARTBEAT_COLLECTION).doc(doc.id).get()
+      const heartbeatMs = firestoreTimeToMs(heartbeatDoc.get('queueListenerHeartbeatAt'))
+      if (!isHeartbeatFresh(heartbeatMs, now)) continue
       const result = await this.assignByAgent(doc.id)
       if (result) count++
     }
