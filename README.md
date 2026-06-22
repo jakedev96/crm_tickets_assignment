@@ -24,13 +24,12 @@ Motor de atribuição de tickets de CS para canais de atendimento da Shopper. Di
 
 ## Visão geral
 
-O motor expõe três Cloud Functions Firebase:
+O motor expõe duas Cloud Functions Firebase:
 
 | Function | Trigger | Responsabilidade |
 |---|---|---|
-| `onWhatsAppTicketEnqueued` | Escrita em `crm_cs_queue/{ticketId}` | Ticket novo na fila → busca agente disponível |
 | `onAgentAvailable` | Escrita em `agent/{agentId}` | Agente entra na fila passiva → busca ticket compatível |
-| `reconcileAssignments` | Schedule — a cada 1 minuto | Rede de segurança para eventos que os listeners perderam |
+| `reconcileAssignments` | Schedule — a cada 30 segundos | Rede de segurança para eventos que os listeners perderam |
 
 Toda atribuição é feita dentro de uma **transação Firestore** que lê e revalida o estado antes de escrever, prevenindo atribuições duplas mesmo sob alta concorrência. O SDK reexecuta a transação automaticamente em caso de contenção (até 5×).
 
@@ -323,13 +322,10 @@ export const meuCanalAssign    = meuCanalContainer.resolve(AssignTicketUseCase)
 export const meuCanalReconcile = meuCanalContainer.resolve(ReconcileAssignmentsUseCase)
 ```
 
-3. Em `index.ts`, adicione o trigger de ticket e inclua o canal no `onAgentAvailable` e no reconciler:
+3. Em `index.ts`, inclua o canal no `onAgentAvailable` e no reconciler:
 
 ```ts
 import { meuCanalAssign, meuCanalReconcile } from './implementation/channels/meu-canal/di'
-
-// Trigger de ticket
-export const onMeuCanalTicketEnqueued = onDocumentWritten('meu_canal_cs_queue/{ticketId}', ...)
 
 // onAgentAvailable — adicione ao encadeamento
 const result = await whatsappAssign.byAgent(agentId)

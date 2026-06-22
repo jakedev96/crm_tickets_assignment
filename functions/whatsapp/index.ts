@@ -3,7 +3,6 @@ import { onSchedule } from 'firebase-functions/v2/scheduler'
 
 import { whatsappAssign, whatsappReconcile } from '../implementation/channels/whatsapp/di'
 
-
 export const onAgentAvailable = onDocumentWritten('agent/{agentId}', async event => {
   const agentId = event.params.agentId
   const before = event.data?.before?.data()
