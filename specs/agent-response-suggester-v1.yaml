@@ -1,0 +1,160 @@
+id: agent-response-suggester-v1
+status: approved
+feature: agent-response-suggester
+firebase_app: default  # reutiliza o app do WhatsApp — tickets está no mesmo Firestore
+
+# ────────────────────────────────────────────────────────────
+# VISÃO GERAL
+#
+# Quando uma nova mensagem chega em tickets/{ticketId}/messages,
+# esta CF é disparada. Ela aguarda até 3 minutos (timeoutSeconds)
+# verificando se chegam mensagens mais recentes para o mesmo ticket.
+#
+# Se uma invocação mais nova reivindicar o lock, a atual aborta.
+# A invocação que sobrar ao final do timeout lê todas as mensagens
+# do ticket, chama o endpoint do agente e salva a resposta sugerida
+# no documento tickets/{ticketId}.
+#
+# Padrão: debounce distribuído via lock field no Firestore.
+# ────────────────────────────────────────────────────────────
+
+trigger:
+  type: onDocumentCreated
+  collection: tickets/{ticketId}/messages/{messageId}
+  options:
+    timeoutSeconds: 180      # 3 minutos — limite máximo da execução
+    memory: 256MiB
+    region: us-central1
+
+debounce:
+  lock_field: agentSuggestionJobId   # campo em tickets/{ticketId}
+  mechanism: |
+    1. Ao iniciar, escreve agentSuggestionJobId = messageId no ticket (sempre sobrescreve).
+    2. Aguarda 15 segundos.
+    3. A cada ciclo: lê tickets/{ticketId}.agentSuggestionJobId.
+       - Se agentSuggestionJobId != messageId → outro invocation mais recente assumiu → ABORT.
+       - Se agentSuggestionJobId == messageId → ainda somos o dono → continua.
+    4. Repete por até 12 ciclos (12 × 15s = 180s).
+    5. Após os ciclos (ou quando decidir prosseguir): executa o fluxo.
+  poll_interval_seconds: 15
+  max_cycles: 12             # 12 × 15s = 180s = timeout total
+
+contract:
+  input:
+    ticketId: string          # extraído do path pelo trigger
+    messageId: string         # extraído do path pelo trigger (usado como lock id)
+    message:                  # dados do documento criado
+      content: string
+      senderId: string
+      createdAt: number
+  output:
+    executed: boolean         # true se chegou a chamar o endpoint
+    aborted: boolean          # true se outro invocation mais recente assumiu o lock
+    agentSuggestion: object | null   # resposta salva no ticket (null se abortado)
+
+# Arquivos que o agente BUILD pode ler (somente esses)
+reads:
+  - functions/domain/models/channels/whatsapp/ICrmCsQueueWhatsappTicket.ts  # referência de modelo
+  - functions/domain/repositories/IAssignmentRepository.ts                  # referência de padrão de interface
+  - functions/domain/usecases/AssignTicketUseCase.ts                        # referência de padrão de use case
+  - functions/implementation/database/whatsapp-firebase/firebase.ts         # reutilizar db
+  - functions/whatsapp/index.ts                                             # referência de padrão de trigger
+  - functions/index.ts                                                      # ponto de re-export
+
+# Arquivos que o agente BUILD pode criar ou modificar (somente esses)
+writes:
+  - functions/agent-response/index.ts                                       # trigger
+  - functions/domain/models/ITicketMessage.ts                               # modelo de mensagem
+  - functions/domain/repositories/IAgentResponseRepository.ts               # interface Firestore
+  - functions/domain/usecases/SuggestAgentResponseUseCase.ts                # orquestração do fluxo
+  - functions/implementation/agent-response/FbAgentResponseRepository.ts   # impl Firestore
+  - functions/index.ts                                                      # adicionar re-export
+
+# Nenhum arquivo de domínio existente deve ser modificado.
+
+firestorePaths:
+  reads:
+    - tickets/{ticketId}                          # lê agentSuggestionJobId (lock check)
+    - tickets/{ticketId}/messages                 # lê todas as mensagens ao executar o fluxo
+  writes:
+    - tickets/{ticketId}.agentSuggestionJobId     # claim e release do lock
+    - tickets/{ticketId}.agentSuggestion          # resposta do endpoint salva aqui
+    - tickets/{ticketId}.agentSuggestionUpdatedAt # timestamp da última sugestão
+
+env_vars:
+  - AGENT_RESPONSE_ENDPOINT_URL   # URL do endpoint que retorna a resposta sugerida
+  - AGENT_RESPONSE_ENDPOINT_KEY   # chave de autenticação (header Authorization: Bearer)
+
+endpoint:
+  method: POST
+  url: "env:AGENT_RESPONSE_ENDPOINT_URL"
+  auth: "Bearer env:AGENT_RESPONSE_ENDPOINT_KEY"
+  body:
+    ticketId: string
+    messages:
+      - content: string
+        senderId: string
+        createdAt: number
+  response_saved_to: "tickets/{ticketId}.agentSuggestion"
+
+# ────────────────────────────────────────────────────────────
+# NOTA ARQUITETURAL
+#
+# A chamada HTTP ao endpoint NÃO vai no repositório (que é
+# estritamente Firestore). Duas opções para o BUILD resolver:
+#
+# Opção A (recomendada — mais simples):
+#   SuggestAgentResponseUseCase orquestra diretamente:
+#   repo.claimLock() → poll loop → repo.readMessages() →
+#   fetch(endpoint) → repo.saveResponse()
+#
+# Opção B (mais SOLID, mais arquivos):
+#   Criar IAgentEndpointClient (interface HTTP) +
+#   HttpAgentEndpointClient (implementação fetch).
+#   SuggestAgentResponseUseCase injeta ambos.
+#
+# Escolher Opção A dado que o cliente HTTP é trivial aqui
+# e não há necessidade de trocar a implementação.
+# ────────────────────────────────────────────────────────────
+
+idempotency: |
+  O lock field (agentSuggestionJobId) garante que apenas uma invocação
+  por ticket executa o fluxo por vez.
+  Se duas invocações chegarem quase simultaneamente, a mais recente
+  (messageId maior, por ordem de criação) sobrescreve o lock e a
+  anterior aborta ao verificar que perdeu o lock.
+  Caso a função falhe após gravar agentSuggestion, o Firestore já
+  terá o valor — reexecução sobrescreve com nova chamada ao endpoint.
+
+error_cases:
+  LOCK_LOST: >
+    agentSuggestionJobId mudou durante o polling → aborta silenciosamente.
+    Log: "[agent-response] ticketId=X lock lost to messageId=Y, aborting".
+  ENDPOINT_ERROR: >
+    Endpoint retorna status != 2xx → loga o erro, não salva agentSuggestion,
+    libera o lock (agentSuggestionJobId = null). Não faz retry automático
+    (próxima mensagem no ticket triggará nova invocação).
+  MISSING_ENV: >
+    AGENT_RESPONSE_ENDPOINT_URL ou AGENT_RESPONSE_ENDPOINT_KEY ausentes →
+    falha no cold start com erro explícito.
+  TIMEOUT: >
+    Se a execução atingir 180s sem completar (edge case de endpoint lento),
+    o Functions runtime cancela a invocação. O lock fica orphan até a
+    próxima mensagem sobrescrevê-lo.
+  NO_MESSAGES: >
+    Subcollection messages vazia ao executar (edge case de mensagem deletada) →
+    não chama o endpoint, loga aviso, libera lock.
+
+test_scenarios:
+  - "1 mensagem → invocação aguarda 3 ciclos (45s) sem novas mensagens → chama endpoint → salva agentSuggestion"
+  - "2 mensagens rápidas → 1ª invocação perde o lock para a 2ª → 1ª aborta, 2ª executa o fluxo"
+  - "endpoint retorna 200 → agentSuggestion salvo no ticket com agentSuggestionUpdatedAt"
+  - "endpoint retorna 500 → agentSuggestion não salvo, lock liberado, log de erro"
+  - "ticket sem mensagens ao executar → fluxo não chama endpoint, log de aviso"
+  - "AGENT_RESPONSE_ENDPOINT_URL ausente → cold start falha com erro explícito"
+  - "mensagens de tickets diferentes não interferem entre si (locks por ticketId)"
+
+commit_convention: |
+  feat(agent-response): CF debounce para sugestão de resposta do agente
+
+  spec: agent-response-suggester-v1

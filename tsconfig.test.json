@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noUnusedLocals": false
+  },
+  "include": ["functions/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "lib"]
+}

@@ -15,5 +15,5 @@
   },
   "compileOnSave": true,
   "include": ["functions/**/*.ts"],
-  "exclude": ["node_modules", "lib"]
+  "exclude": ["node_modules", "lib", "tests"]
 }
