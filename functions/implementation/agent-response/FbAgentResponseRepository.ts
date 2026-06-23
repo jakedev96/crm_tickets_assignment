@@ -1,5 +1,5 @@
 import { injectable } from 'tsyringe'
-import type { FieldValue } from 'firebase-admin/firestore'
+import { FieldValue } from 'firebase-admin/firestore'
 import { db } from '../database/whatsapp-firebase/firebase'
 import type { IAgentResponseRepository } from '../../domain/repositories/IAgentResponseRepository'
 import type { ITicketMessage } from '../../domain/models/ITicketMessage'
@@ -14,9 +14,9 @@ export class FbAgentResponseRepository implements IAgentResponseRepository {
     })
   }
 
-  async isLockOwned(ticketId: string, messageId: string): Promise<boolean> {
+  async getCurrentLockHolder(ticketId: string): Promise<string | null> {
     const snap = await db.collection(TICKETS_COLLECTION).doc(ticketId).get()
-    return snap.get('agentSuggestionJobId') === messageId
+    return snap.get('agentSuggestionJobId') ?? null
   }
 
   async releaseLock(ticketId: string): Promise<void> {
@@ -42,10 +42,9 @@ export class FbAgentResponseRepository implements IAgentResponseRepository {
   }
 
   async saveSuggestion(ticketId: string, suggestion: unknown): Promise<void> {
-    const { serverTimestamp } = await import('firebase-admin/firestore')
     await db.collection(TICKETS_COLLECTION).doc(ticketId).update({
       agentSuggestion: suggestion,
-      agentSuggestionUpdatedAt: serverTimestamp(),
+      agentSuggestionUpdatedAt: FieldValue.serverTimestamp(),
     })
   }
 }

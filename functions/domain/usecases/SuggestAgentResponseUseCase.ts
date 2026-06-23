@@ -26,9 +26,9 @@ export class SuggestAgentResponseUseCase {
       await sleep(POLL_INTERVAL_MS)
 
       // 3. Verifica se ainda é o dono do lock
-      const isOwned = await this.repo.isLockOwned(ticketId, messageId)
-      if (!isOwned) {
-        console.log(`[agent-response] ticketId=${ticketId} lock lost to another invocation, aborting`)
+      const currentHolder = await this.repo.getCurrentLockHolder(ticketId)
+      if (currentHolder !== messageId) {
+        console.log(`[agent-response] ticketId=${ticketId} lock lost to messageId=${currentHolder}, aborting`)
         return { executed: false, aborted: true, agentSuggestion: null }
       }
     }

@@ -146,7 +146,7 @@ error_cases:
     não chama o endpoint, loga aviso, libera lock.
 
 test_scenarios:
-  - "1 mensagem → invocação aguarda 3 ciclos (45s) sem novas mensagens → chama endpoint → salva agentSuggestion"
+  - "1 mensagem → invocação aguarda 12 ciclos (180s) sem novas mensagens → chama endpoint → salva agentSuggestion"
   - "2 mensagens rápidas → 1ª invocação perde o lock para a 2ª → 1ª aborta, 2ª executa o fluxo"
   - "endpoint retorna 200 → agentSuggestion salvo no ticket com agentSuggestionUpdatedAt"
   - "endpoint retorna 500 → agentSuggestion não salvo, lock liberado, log de erro"
