@@ -32,7 +32,7 @@ services:
       # - "9230:9230" # Debugger
     depends_on:
       - functions
-    command: firebase emulators:start --only functions,firestore,pubsub --project ticket-assigner --import=/app/emulator-data --export-on-exit=/app/emulator-data
+    command: firebase emulators:start --only functions,firestore,pubsub --project crm-functions --import=/app/emulator-data --export-on-exit=/app/emulator-data
     volumes:
       - ./node_modules:/app/node_modules
       - dist:/app/lib

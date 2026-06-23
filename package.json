@@ -1,5 +1,5 @@
 {
-  "name": "ticket-assigner",
+  "name": "crm-functions",
   "version": "1.0.0",
   "main": "lib/index.js",
   "repository": "git@github.com:jakedev96/crm_ticket_assigner.git",
@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "deploy": "firebase deploy --only functions:ticket-assigner",
+    "deploy": "firebase deploy --only functions:crm-functions",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage"

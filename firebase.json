@@ -2,7 +2,7 @@
   "functions": [
     {
       "source": ".",
-      "codebase": "ticket-assigner",
+      "codebase": "crm-functions",
       "runtime": "nodejs20"
     }
   ],

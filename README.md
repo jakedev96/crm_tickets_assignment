@@ -1,4 +1,4 @@
-# ticket-assigner
+# crm-functions
 
 Motor de atribuição de tickets de CS para canais de atendimento da Shopper. Distribui tickets da fila Firestore para agentes disponíveis com garantia de anti-corrida via transações atômicas.
 
@@ -63,7 +63,7 @@ Firestore (Firebase Admin SDK)
 ## Estrutura de pastas
 
 ```
-ticket-assigner/
+crm-functions/
 ├── functions/
 │   ├── index.ts                          # Entrypoint — re-exporta os módulos de canal
 │   ├── whatsapp/
@@ -146,8 +146,8 @@ O motor seleciona o próximo ticket em **4 camadas**, em ordem de prioridade:
 ## Instalação
 
 ```bash
-git clone git@github.com:shopperti/ticket-assigner.git
-cd ticket-assigner
+git clone git@github.com:shopperti/crm-functions.git
+cd crm-functions
 yarn install
 ```
 
@@ -224,10 +224,10 @@ yarn watch        # compila em modo watch
 
 ```bash
 yarn deploy
-# equivale a: firebase deploy --only functions:ticket-assigner
+# equivale a: firebase deploy --only functions:crm-functions
 ```
 
-O deploy usa a **codebase** `ticket-assigner` configurada no `firebase.json`, o que garante que apenas as functions deste repositório são gerenciadas — functions de outros projetos no mesmo Firebase não são afetadas.
+O deploy usa a **codebase** `crm-functions` configurada no `firebase.json`, o que garante que apenas as functions deste repositório são gerenciadas — functions de outros projetos no mesmo Firebase não são afetadas.
 
 ### Deploy via Docker (homolog)
 

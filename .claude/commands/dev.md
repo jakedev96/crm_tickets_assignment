@@ -1,6 +1,6 @@
 # Skill: dev
 
-Guia de implementação do projeto `ticket-assigner`. Toda vez que for implementar algo neste projeto, siga rigorosamente as regras abaixo.
+Guia de implementação do projeto `crm-functions`. Toda vez que for implementar algo neste projeto, siga rigorosamente as regras abaixo.
 
 ---
 

@@ -21,4 +21,4 @@ RUN yarn build
 # ── Produção ──────────────────────────────────────────────────────────────────
 FROM build AS production
 
-CMD firebase deploy --project $FB_PROJECT_ID --token $FB_DEPLOY_TOKEN --only functions:ticket-assigner
+CMD firebase deploy --project $FB_PROJECT_ID --token $FB_DEPLOY_TOKEN --only functions:crm-functions
