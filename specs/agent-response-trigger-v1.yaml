@@ -1,0 +1,129 @@
+id: agent-response-trigger-v1
+status: draft
+feature: agent-response-trigger
+target_repo: whatsapp_integration   # spec para uso no repo whatsapp_integration, não aqui
+firebase_app: default               # mesmo projeto/Firestore do whatsapp_integration
+
+# ────────────────────────────────────────────────────────────
+# VISÃO GERAL
+#
+# Quando uma nova mensagem chega em tickets/{ticketId}/messages,
+# esta CF aplica debounce distribuído (lock no Firestore) e,
+# ao final do deadline sem perder o lock, dispara o Bot de IA
+# (Kdabra) passando ticket_id.
+#
+# O Bot processa de forma assíncrona (~100-160s) e devolve a
+# resposta via callback para a rc_api — esta CF NÃO recebe a
+# resposta; ela apenas dispara e salva status "pending" em
+# agent_responses/{ticketId}.
+#
+# Referência de contrato do Bot: specs/kdabra-api-spec.md
+# ────────────────────────────────────────────────────────────
+
+trigger:
+  type: onDocumentCreated
+  collection: tickets/{ticketId}/messages/{messageId}
+  options:
+    timeoutSeconds: 180
+    memory: 256MiB
+    region: us-central1
+
+debounce:
+  lock_field: last_message_id
+  deadline_field: agentSuggestionDeadline   # epoch ms — definido pela 1ª invocação, herdado pelas seguintes
+  debounce_ms: 180000                        # 3 minutos TOTAIS por ticket desde a 1ª mensagem
+  mechanism: |
+    1. Ao iniciar, em transação Firestore sobre agent_responses/{ticketId}:
+       - Escreve last_message_id = messageId (sempre sobrescreve — torna-se o lock owner).
+       - Escreve agentSuggestionDeadline = Date.now() + 180000 SOMENTE SE
+         agentSuggestionDeadline não existir ou já tiver expirado (deadline < Date.now()).
+         Mensagens posteriores herdam o deadline da 1ª — o timer NÃO reinicia.
+    2. Lê agentSuggestionDeadline para calcular o tempo restante.
+    3. A cada ciclo (15s): lê agent_responses/{ticketId}.last_message_id.
+       - Se != messageId → outro invocation mais recente assumiu → ABORT.
+       - Se Date.now() >= agentSuggestionDeadline → deadline atingido → prossegue.
+       - Caso contrário → aguarda próximo ciclo de 15s.
+    4. Máximo de 12 ciclos como limite de segurança contra loops infinitos.
+    5. Ao prosseguir: verifica mensagens em tickets/{ticketId}/messages, chama Bot API,
+       limpa deadline e lock em agent_responses/{ticketId}.
+  poll_interval_seconds: 15
+  max_cycles: 12   # limite de segurança — o deadline é quem determina a saída
+
+contract:
+  input:
+    ticketId: string    # extraído do path pelo trigger
+    messageId: string   # extraído do path pelo trigger (usado como lock id)
+  output:
+    triggered: boolean  # true se chegou a chamar o Bot e recebeu 202
+    aborted: boolean    # true se perdeu o lock durante o polling
+
+reads:
+  - server/whatsapp/index.js   # referência de padrão de CF e inicialização do Firestore
+
+writes:
+  - server/agent-response-trigger/index.js   # toda a lógica: CF + debounce + chamada ao Bot
+
+firestorePaths:
+  reads:
+    - agent_responses/{ticketId}    # lock check (last_message_id, agentSuggestionDeadline) a cada ciclo
+    - tickets/{ticketId}/messages   # verificação NO_MESSAGES antes de chamar o Bot
+  writes:
+    - agent_responses/{ticketId}.last_message_id         # claim do lock; null ao liberar
+    - agent_responses/{ticketId}.agentSuggestionDeadline # epoch ms; definido na 1ª mensagem; null ao liberar
+    - agent_responses/{ticketId}.agentSuggestionStatus   # "pending" após 202 aceito pelo Bot
+
+env_vars:
+  - AGENT_RESPONSE_ENDPOINT_URL    # URL da Lambda do Bot (Kdabra) — endpoint de entrada
+  - AGENT_RESPONSE_ENDPOINT_KEY    # Bearer token de entrada (KDABRA_INBOUND_TOKEN)
+
+endpoint:
+  method: POST
+  url: "env:AGENT_RESPONSE_ENDPOINT_URL"
+  auth: "Bearer env:AGENT_RESPONSE_ENDPOINT_KEY"
+  body:
+    ticket_id: string    # ticketId extraído do path
+  responses:
+    202:
+      description: Bot aceitou — processamento assíncrono iniciado
+      body: '{ "status": "accepted", "request_id": "<uuid>" }'
+    4xx/5xx:
+      description: Falha no Bot — liberar lock e deadline, não salvar status
+
+idempotency: |
+  last_message_id garante que apenas uma invocação por ticket execute o fluxo.
+  agentSuggestionDeadline garante que o timer de 3 minutos é por ticket, não por
+  invocação: mensagens chegando dentro do deadline herdam o timer original.
+  Se a CF falhar após o 202 (antes de limpar deadline e lock), ambos ficam orphan
+  até a próxima mensagem sobrescrevê-los — o deadline expirado é detectado e
+  substituído pela nova invocação.
+
+error_cases:
+  LOCK_LOST: >
+    agent_responses/{ticketId}.last_message_id mudou durante o polling → aborta silenciosamente.
+    Log: "[agent-response] ticketId=X lock lost to messageId=Y, aborting".
+  ENDPOINT_ERROR: >
+    Bot retorna status != 202 → loga o erro, libera lock e deadline em agent_responses/{ticketId}
+    (last_message_id = null, agentSuggestionDeadline = null), não salva agentSuggestionStatus.
+    Não faz retry automático.
+    Log: "[agent-response] ticketId=X bot error status=N".
+  MISSING_ENV: >
+    AGENT_RESPONSE_ENDPOINT_URL ou AGENT_RESPONSE_ENDPOINT_KEY ausentes →
+    falha no cold start com erro explícito.
+  NO_MESSAGES: >
+    tickets/{ticketId}/messages vazia ao executar (edge case: mensagem deletada após trigger) →
+    não chama o Bot, loga aviso, libera lock e deadline em agent_responses/{ticketId}.
+    Log: "[agent-response] ticketId=X no messages found, releasing lock".
+
+test_scenarios:
+  - "1 mensagem → deadline definido em t=0; aguarda até t=180s → chama Bot → recebe 202 → salva status=pending, limpa lock e deadline"
+  - "3 mensagens em t=0, t=30, t=90 → deadline fixado em t+180 pela 1ª; 3ª invocação herda deadline t+180 e chama Bot em t=180 (não t=270)"
+  - "2 mensagens rápidas → 1ª perde o lock para a 2ª → 1ª aborta, 2ª chama Bot no deadline original"
+  - "Bot retorna 500 → lock e deadline liberados (null), agentSuggestionStatus não salvo"
+  - "ticket sem mensagens ao executar → Bot não chamado, lock e deadline liberados"
+  - "env var ausente → cold start falha com erro explícito"
+  - "mensagens de tickets diferentes não interferem entre si (deadline e lock isolados por ticketId)"
+
+commit_convention: |
+  feat(agent-response-trigger): CF debounce para disparo da sugestão de resposta IA
+
+  spec: agent-response-trigger-v1

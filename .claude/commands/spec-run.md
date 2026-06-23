@@ -50,11 +50,12 @@ ${JSON.stringify(context)}
 
 Antes de implementar:
 - Invoque a skill /dev
-- Invoque a skill /spec-build ${SPEC_ID}
+- Invoque a skill /spec-build ${EFFECTIVE_ID}
 `
 
 const jsonMatch = context.match(/\{[\s\S]*\}/)
 const specData = JSON.parse(jsonMatch ? jsonMatch[0] : context)
+const EFFECTIVE_ID = specData.spec.id || SPEC_ID
 const writes = specData.spec.writes
 
 const domainWrites   = writes.filter(f => f.includes('domain/models') || f.includes('domain/repositories'))
@@ -115,6 +116,7 @@ await agent(
   ${triggerWrites.map(f => `- ${f}`).join('\n')}
 
   Leia os arquivos criados pelos builders antes de escrever o trigger.
+  No commit final, inclua APENAS os arquivos listados em writes: da spec — não adicione outros arquivos ao staging.
   Siga o commit_convention da spec para o commit final.`,
   { label: 'wirer', phase: 'Wire', model: 'haiku', effort: 'low' }
 )
@@ -125,7 +127,7 @@ phase('Verify')
 const verifyResult = await agent(
   `Você é o Verifier adversarial do swarm SDD.
 
-  Invoque a skill /spec-verify ${SPEC_ID}
+  Invoque a skill /spec-verify ${EFFECTIVE_ID}
 
   Retorne o resultado completo da verificação com RESULT: APPROVED ou REJECTED.
   Seja direto. Não explique o que fez, não adicione comentários sobre sua abordagem.`,
@@ -138,7 +140,7 @@ phase('Test')
 const testResult = await agent(
   `Você é o Tester do swarm SDD para a spec ${SPEC_ID}.
 
-  Invoque a skill /spec-test ${SPEC_ID}
+  Invoque a skill /spec-test ${EFFECTIVE_ID}
 
   Retorne o resultado completo com TESTS: PASSED ou FAILED.
   Seja direto. Não explique o que fez, não adicione comentários sobre sua abordagem.`,
